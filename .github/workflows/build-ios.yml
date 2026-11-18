@@ -8,18 +8,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Show repo layout (diagnostics)
-        run: |
-          echo "=== root ==="; ls -la
-          echo "=== www ==="; ls -la www 2>/dev/null | head -30 || echo "MISSING www"
-          echo "=== ios ==="; ls -la ios 2>/dev/null | head -20 || echo "MISSING ios"
-          cat package.json 2>/dev/null || echo "MISSING package.json"
-
-      - name: Runner info
-        run: sw_vers && xcodebuild -version && node -v && npm -v
+      - uses: actions/checkout@v4
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -27,39 +16,66 @@ jobs:
           node-version: '20'
 
       - name: Install dependencies
-        run: |
-          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+        run: npm install --no-audit --no-fund
 
-      - name: Sync Capacitor iOS project
+      - name: Verify web assets
         run: |
-          set -e
-          if [ -d ios/App ]; then npx cap sync ios; else npx cap add ios; fi
+          if [ ! -f www/index.html ]; then
+            echo "::error::www/index.html 不存在，请重新上传 www 目录"; exit 1
+          fi
+
+      - name: Rebuild iOS platform (fresh)
+        run: |
+          set -x
+          rm -rf ios
+          npx cap add ios
+          if [ -f AppIcon-1024.png ]; then
+            cp AppIcon-1024.png ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png
+          fi
+          npx cap sync ios
 
       - name: Pod install
         run: |
-          set -e
+          set -x
           cd ios/App
           if [ -f Podfile ]; then
             command -v pod >/dev/null 2>&1 || sudo gem install cocoapods --no-document
             pod install --repo-update
           fi
 
-      - name: Build unsigned archive
+      - name: Build (unsigned, exposes real error)
         run: |
-          set -e
+          set -o pipefail
           cd ios/App
+          mkdir -p build
+          LOG=build/xcodebuild.log
           if [ -f App.xcworkspace ]; then TARGET="-workspace App.xcworkspace"; else TARGET="-project App.xcodeproj"; fi
+          set +e
           xcodebuild $TARGET -scheme App -configuration Release -sdk iphoneos \
-            -derivedDataPath build -archivePath build/App.xcarchive archive \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" | tail -n 80
+            -derivedDataPath build build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" \
+            > $LOG 2>&1
+          RC=$?
+          set -e
+          echo "xcodebuild exit code: $RC"
+          tail -n 150 $LOG
+          if [ $RC -ne 0 ]; then exit $RC; fi
 
       - name: Package IPA
         run: |
           set -e
           cd ios/App
+          APP=build/Build/Products/Release-iphoneos/App.app
+          if [ ! -d "$APP" ]; then
+            echo "未找到 App.app，列出产物："
+            find build/Build -maxdepth 4 -name '*.app' || true
+            exit 1
+          fi
           mkdir -p build/Payload
-          cp -R build/App.xcarchive/Products/Applications/App.app build/Payload/
-          cd build && zip -qr App-unsigned.ipa Payload && ls -lh App-unsigned.ipa
+          cp -R "$APP" build/Payload/
+          cd build
+          zip -qr App-unsigned.ipa Payload
+          ls -lh App-unsigned.ipa
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4

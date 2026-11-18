@@ -5,37 +5,53 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
-    timeout-minutes: 45
+    runs-on: macos-latest
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Show repo layout (diagnostics)
+        run: |
+          echo "=== root ==="; ls -la
+          echo "=== www ==="; ls -la www 2>/dev/null | head -30 || echo "MISSING www"
+          echo "=== ios ==="; ls -la ios 2>/dev/null | head -20 || echo "MISSING ios"
+          cat package.json 2>/dev/null || echo "MISSING package.json"
+
+      - name: Runner info
+        run: sw_vers && xcodebuild -version && node -v && npm -v
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
 
       - name: Install dependencies
-        run: npm ci
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
       - name: Sync Capacitor iOS project
-        run: npx cap sync ios
+        run: |
+          set -e
+          if [ -d ios/App ]; then npx cap sync ios; else npx cap add ios; fi
+
+      - name: Pod install
+        run: |
+          set -e
+          cd ios/App
+          if [ -f Podfile ]; then
+            command -v pod >/dev/null 2>&1 || sudo gem install cocoapods --no-document
+            pod install --repo-update
+          fi
 
       - name: Build unsigned archive
         run: |
           set -e
           cd ios/App
-          if [ -f App.xcworkspace ]; then
-            xcodebuild -workspace App.xcworkspace -scheme App -configuration Release -sdk iphoneos \
-              -derivedDataPath build -archivePath build/App.xcarchive archive \
-              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM=""
-          else
-            xcodebuild -project App.xcodeproj -scheme App -configuration Release -sdk iphoneos \
-              -derivedDataPath build -archivePath build/App.xcarchive archive \
-              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM=""
-          fi
+          if [ -f App.xcworkspace ]; then TARGET="-workspace App.xcworkspace"; else TARGET="-project App.xcodeproj"; fi
+          xcodebuild $TARGET -scheme App -configuration Release -sdk iphoneos \
+            -derivedDataPath build -archivePath build/App.xcarchive archive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" | tail -n 80
 
       - name: Package IPA
         run: |
@@ -43,9 +59,7 @@ jobs:
           cd ios/App
           mkdir -p build/Payload
           cp -R build/App.xcarchive/Products/Applications/App.app build/Payload/
-          cd build
-          zip -qr App-unsigned.ipa Payload
-          ls -lh App-unsigned.ipa
+          cd build && zip -qr App-unsigned.ipa Payload && ls -lh App-unsigned.ipa
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4

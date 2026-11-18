@@ -10,8 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
 
@@ -20,46 +19,43 @@ jobs:
 
       - name: Verify web assets
         run: |
-          if [ ! -f www/index.html ]; then
-            echo "::error::www/index.html 不存在，请重新上传 www 目录"; exit 1
-          fi
+          test -f www/index.html || { echo "::error::www/index.html missing"; exit 1; }
 
-      - name: Rebuild iOS platform (fresh)
+      - name: Rebuild iOS platform
         run: |
           set -x
           rm -rf ios
           npx cap add ios
-          if [ -f AppIcon-1024.png ]; then
-            cp AppIcon-1024.png ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png
-          fi
+          cp AppIcon-1024.png ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png
           npx cap sync ios
+          ls -la ios/App
+          if [ ! -f ios/App/Podfile ]; then echo "::error::Podfile missing"; exit 1; fi
 
       - name: Pod install
         run: |
           set -x
           cd ios/App
-          if [ -f Podfile ]; then
-            command -v pod >/dev/null 2>&1 || sudo gem install cocoapods --no-document
-            pod install --repo-update
-          fi
+          command -v pod >/dev/null 2>&1 || sudo gem install cocoapods --no-document
+          pod install --repo-update
+          ls -la App.xcworkspace
 
-      - name: Build (unsigned, exposes real error)
+      - name: Build unsigned
         run: |
           set -o pipefail
           cd ios/App
           mkdir -p build
           LOG=build/xcodebuild.log
-          if [ -f App.xcworkspace ]; then TARGET="-workspace App.xcworkspace"; else TARGET="-project App.xcodeproj"; fi
-          set +e
-          xcodebuild $TARGET -scheme App -configuration Release -sdk iphoneos \
-            -derivedDataPath build build \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" \
-            > $LOG 2>&1
-          RC=$?
-          set -e
-          echo "xcodebuild exit code: $RC"
-          tail -n 150 $LOG
-          if [ $RC -ne 0 ]; then exit $RC; fi
+          if xcodebuild -workspace App.xcworkspace -scheme App -configuration Release -sdk iphoneos \
+               -derivedDataPath build build \
+               CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" \
+               > "$LOG" 2>&1; then
+            echo "xcodebuild OK"
+          else
+            echo "xcodebuild FAILED - last 200 lines:"
+            tail -n 200 "$LOG"
+            exit 1
+          fi
+          tail -n 20 "$LOG"
 
       - name: Package IPA
         run: |
@@ -67,8 +63,8 @@ jobs:
           cd ios/App
           APP=build/Build/Products/Release-iphoneos/App.app
           if [ ! -d "$APP" ]; then
-            echo "未找到 App.app，列出产物："
-            find build/Build -maxdepth 4 -name '*.app' || true
+            echo "App.app not found; listing products:"
+            find build -name '*.app' -maxdepth 6 || true
             exit 1
           fi
           mkdir -p build/Payload

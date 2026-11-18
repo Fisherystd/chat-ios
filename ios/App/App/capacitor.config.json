@@ -1,0 +1,14 @@
+{
+	"appId": "com.persona.chat.local",
+	"appName": "人设聊天室",
+	"webDir": "www",
+	"backgroundColor": "#f5f6fb",
+	"ios": {
+		"contentInset": "always"
+	},
+	"server": {
+		"androidScheme": "https",
+		"iosScheme": "capacitor"
+	},
+	"packageClassList": []
+}

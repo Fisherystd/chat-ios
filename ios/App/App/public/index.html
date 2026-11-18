@@ -1,0 +1,1139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <script>window.__LOCAL_MODE__ = true;</script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <!-- PWA / iOS 安装（契约 33/34，manifest 与 icons 由 Lead 提供，勿改） -->
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="人设聊天室（本机版）">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon-180.png">
+  <meta name="theme-color" content="#4f6ef7">
+  <title>人设聊天室（本机版）</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="local-mode">
+  <div id="app"></div>
+
+  <!-- ======================= 根组件 ======================= -->
+  <template id="tpl-app">
+    <div class="app-shell" v-cloak :class="{ 'has-ios-hint': iosHintVisible }">
+      <div v-if="!booted" class="boot-screen">
+        <template v-if="!bootErrorText">
+          <div class="spinner"></div>
+          <p>正在连接服务…</p>
+        </template>
+        <template v-else>
+          <p class="boot-error">{{ bootErrorText }}</p>
+          <button type="button" class="btn btn-primary" @click="retryBoot">重试</button>
+        </template>
+      </div>
+      <template v-else>
+        <div v-if="iosHintVisible" class="ios-hint">
+          <span class="ios-hint-text">安装到主屏幕：点击底部分享按钮 → 添加到主屏幕</span>
+          <button type="button" class="icon-btn ios-hint-close" aria-label="关闭提示" @click="dismissIosHint">×</button>
+        </div>
+        <top-bar v-if="loggedIn" @toggle-nav="navOpen = !navOpen"></top-bar>
+        <div v-if="loggedIn && navOpen" class="drawer-mask" @click="navOpen = false"></div>
+        <nav v-if="loggedIn && navOpen" class="nav-drawer">
+          <a class="nav-drawer-item" href="#/">聊天</a>
+          <a class="nav-drawer-item" href="#/personas">人设</a>
+          <a class="nav-drawer-item" href="#/import">导入</a>
+          <a class="nav-drawer-item" href="#/settings">设置</a>
+          <a class="nav-drawer-item" href="#" @click.prevent="openTutorial">使用教程</a>
+          <a v-if="$S.state.user && $S.state.user.role === 'admin'" class="nav-drawer-item" href="#/admin">管理</a>
+          <div class="nav-drawer-foot">
+            <div class="nav-drawer-user">
+              <span class="user-name">{{ $S.state.user && $S.state.user.username }}</span>
+              <span v-if="$S.state.user" class="badge" :class="'badge-' + statusClass">{{ statusText }}</span>
+            </div>
+            <button type="button" class="btn btn-block nav-drawer-logout" @click="logout">退出登录</button>
+          </div>
+        </nav>
+        <main class="view-container">
+          <component :is="currentView"></component>
+        </main>
+        <toast-host></toast-host>
+        <tutorial-modal v-if="tutorialOpen" @close="tutorialOpen = false"></tutorial-modal>
+      </template>
+    </div>
+  </template>
+
+  <!-- ======================= Toast ======================= -->
+  <template id="tpl-toast-host">
+    <div class="toast-host" aria-live="polite">
+      <div v-for="t in $S.state.toasts" :key="t.id" class="toast" :class="'toast-' + t.type">
+        <span class="toast-text">{{ t.message }}</span>
+        <button type="button" class="toast-close" @click="$S.dismissToast(t.id)">×</button>
+      </div>
+    </div>
+  </template>
+
+  <!-- ======================= 顶栏 ======================= -->
+  <template id="tpl-topbar">
+    <header class="topbar">
+      <button type="button" class="icon-btn hamburger" aria-label="打开导航" @click="$emit('toggle-nav')">☰</button>
+      <a class="brand" href="#/">人设聊天室</a>
+      <nav class="nav-links">
+        <a href="#/" :class="{ active: routeName === 'chat' }">聊天</a>
+        <a href="#/personas" :class="{ active: routeName === 'personas' }">人设</a>
+        <a href="#/import" :class="{ active: routeName === 'import' }">导入</a>
+        <a href="#/settings" :class="{ active: routeName === 'settings' }">设置</a>
+        <a v-if="$S.state.user && $S.state.user.role === 'admin'" href="#/admin" :class="{ active: routeName === 'admin' }">管理</a>
+      </nav>
+      <div class="topbar-user" v-if="$S.state.user">
+        <span class="user-name">{{ $S.state.user.username }}</span>
+        <span class="badge" :class="'badge-' + statusClass">{{ statusText }}</span>
+        <span v-if="expiryText" class="expiry-text">{{ expiryText }}</span>
+        <button type="button" class="btn btn-ghost tutorial-btn" @click="openTutorial">教程</button>
+        <button type="button" class="btn btn-ghost logout-btn" @click="logout">退出登录</button>
+      </div>
+    </header>
+  </template>
+
+  <!-- ======================= 初始化管理员 ======================= -->
+  <template id="tpl-setup">
+    <div class="auth-page">
+      <div class="auth-card">
+        <h1 class="auth-brand">人设聊天室</h1>
+        <p class="auth-sub">欢迎使用！首次使用请初始化管理员账户。</p>
+        <form @submit.prevent="submit">
+          <label class="field">
+            <span class="field-label">用户名</span>
+            <input v-model.trim="username" type="text" autocomplete="username"
+              placeholder="2-24 位字母、数字、下划线或中文" maxlength="24">
+          </label>
+          <label class="field">
+            <span class="field-label">密码</span>
+            <input v-model="password" type="password" autocomplete="new-password" placeholder="至少 6 位">
+          </label>
+          <label class="field">
+            <span class="field-label">确认密码</span>
+            <input v-model="confirm" type="password" autocomplete="new-password" placeholder="再次输入密码">
+          </label>
+          <p v-if="error" class="form-error">{{ error }}</p>
+          <button type="submit" class="btn btn-primary btn-block" :disabled="busy || !canSubmit">
+            {{ busy ? '请稍候…' : '初始化并登录' }}
+          </button>
+        </form>
+      </div>
+    </div>
+  </template>
+
+  <!-- ======================= 登录 / 注册 ======================= -->
+  <template id="tpl-login">
+    <div class="auth-page">
+      <div class="auth-card">
+        <h1 class="auth-brand">人设聊天室</h1>
+        <div class="tabs" v-if="allowRegistration">
+          <button type="button" class="tab" :class="{ active: tab === 'login' }" @click="switchTab('login')">登录</button>
+          <button type="button" class="tab" :class="{ active: tab === 'register' }" @click="switchTab('register')">注册</button>
+        </div>
+        <form @submit.prevent="submit">
+          <label class="field">
+            <span class="field-label">用户名</span>
+            <input v-model.trim="username" type="text" autocomplete="username"
+              placeholder="2-24 位字母、数字、下划线或中文" maxlength="24">
+          </label>
+          <label class="field">
+            <span class="field-label">密码</span>
+            <input v-model="password" type="password" :autocomplete="tab === 'login' ? 'current-password' : 'new-password'"
+              placeholder="至少 6 位">
+          </label>
+          <label v-if="tab === 'register'" class="field">
+            <span class="field-label">确认密码</span>
+            <input v-model="confirm" type="password" autocomplete="new-password" placeholder="再次输入密码">
+          </label>
+          <p v-if="error" class="form-error">{{ error }}</p>
+          <button type="submit" class="btn btn-primary btn-block" :disabled="busy || !canSubmit">
+            {{ busy ? '请稍候…' : (tab === 'login' ? '登录' : '注册并登录') }}
+          </button>
+        </form>
+        <p v-if="tab === 'register'" class="hint">注册后自动登录。注册功能由管理员在管理面板控制。</p>
+      </div>
+    </div>
+  </template>
+
+  <!-- ======================= 聊天主界面 ======================= -->
+  <template id="tpl-chat">
+    <div class="chat-wrap">
+      <aside class="chat-sidebar panel">
+        <chat-list :chats="chats" :active-id="selectedId"
+          @select="onSelect" @new="openNewChat" @remove="deleteChat"></chat-list>
+      </aside>
+      <div v-if="drawerOpen" class="drawer-mask" @click="drawerOpen = false"></div>
+      <aside v-if="drawerOpen" class="chat-drawer panel">
+        <chat-list :chats="chats" :active-id="selectedId"
+          @select="onSelect" @new="openNewChat" @remove="deleteChat"></chat-list>
+      </aside>
+      <main class="chat-main panel">
+        <div class="chat-header">
+          <button type="button" class="icon-btn mobile-only" aria-label="打开会话列表" @click="drawerOpen = true">☰</button>
+          <img v-if="chat && chat.personaAvatar" :src="chat.personaAvatar" class="chat-avatar" alt="角色头像">
+          <span v-else-if="chat" class="chat-avatar chat-avatar-ph">{{ (chat.personaName || chat.title || '?').charAt(0) }}</span>
+          <div class="chat-title-box">
+            <div class="chat-title">{{ chatTitle }}</div>
+            <div v-if="chat" class="chat-sub">
+              {{ chat.personaName || '' }}<template v-if="chat.model"> · {{ chat.model }}</template>
+              <span class="mode-badge" :class="chat.mode === 'story' ? 'mode-badge-story' : (chat.mode === 'novel' ? 'mode-badge-novel' : '')"
+                :title="chat.mode === 'story' ? '故事模式：附带描写与剧情承接' : (chat.mode === 'novel' ? '小说模式：以小说体裁创作/续写，篇幅更长' : '聊天模式：只进行角色对话')">
+                {{ chat.mode === 'story' ? '故事模式' : (chat.mode === 'novel' ? '小说模式' : '聊天模式') }}
+              </span>
+              <span v-if="chat.summary" class="summary-badge" title="较早的对话已压缩为摘要">已压缩历史</span>
+              <span v-if="chat.selfPersona" class="self-badge" title="已设置我的身份（对话者身份设定）">已设置我的身份</span>
+            </div>
+          </div>
+          <div class="chat-actions" v-if="chat">
+            <button type="button" class="btn btn-ghost desktop-only" @click="openSelfDialog">我的身份</button>
+            <button type="button" class="btn btn-ghost desktop-only"
+              @click="openDialogSettings">对话设置</button>
+            <button type="button" class="btn btn-ghost desktop-only" :disabled="summarizing || streaming"
+              @click="summarize">{{ summarizing ? '压缩中…' : '压缩历史' }}</button>
+            <div class="dropdown-wrap">
+              <button type="button" class="btn btn-ghost" @click="exportOpen = !exportOpen">导出</button>
+              <div v-if="exportOpen" class="dropdown">
+                <button type="button" class="dropdown-item" @click="exportChat('md')">Markdown (.md)</button>
+                <button type="button" class="dropdown-item" @click="exportChat('txt')">纯文本 (.txt)</button>
+                <button type="button" class="dropdown-item" @click="exportChat('json')">JSON (.json)</button>
+              </div>
+            </div>
+            <div class="dropdown-wrap mobile-only">
+              <button type="button" class="icon-btn" aria-label="更多操作" @click="moreOpen = !moreOpen">⋯</button>
+              <div v-if="moreOpen" class="dropdown more-menu">
+                <button type="button" class="dropdown-item" @click="openSelfDialog">我的身份</button>
+                <button type="button" class="dropdown-item" @click="openDialogSettings">对话设置</button>
+                <button type="button" class="dropdown-item" :disabled="summarizing || streaming"
+                  @click="summarize">{{ summarizing ? '压缩中…' : '压缩历史' }}</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div v-if="hasState" class="state-panel">
+          <button type="button" class="state-panel-head" @click="toggleState">
+            <span class="state-panel-title">角色状态</span>
+            <span class="state-panel-toggle">{{ stateOpen ? '▲' : '▼' }}</span>
+          </button>
+          <div v-if="stateOpen" class="state-panel-body">
+            <div v-for="(v, k) in chat.state" :key="k" class="state-row">
+              <span class="state-key">{{ k }}</span>
+              <span class="state-value">{{ v }}</span>
+            </div>
+          </div>
+        </div>
+        <div v-if="chat" ref="msgBox" class="messages">
+          <div v-if="loadingChat" class="empty">
+            <div class="spinner"></div>
+            <p>加载中…</p>
+          </div>
+          <div v-else-if="!chat.messages || !chat.messages.length" class="empty">
+            <p>开始和「{{ chat.personaName || chat.title }}」聊天吧</p>
+          </div>
+          <div v-for="m in chat.messages" :key="m.id" class="msg" :class="'msg-' + m.role">
+            <div class="bubble">
+              <div v-if="m.role === 'assistant'" class="md-body" v-sanitize="m.content"></div>
+              <div v-else class="plain-body">{{ m.content }}</div>
+              <div class="msg-meta">
+                <span class="msg-time">{{ $time.fmtTime(m.ts) }}</span>
+                <span v-if="m.stopped" class="msg-flag">已停止</span>
+                <span v-if="m.streamError" class="msg-flag msg-flag-error">{{ m.streamError }}</span>
+                <button v-if="m.streamError" type="button" class="btn btn-small" @click="retry(m)">重试</button>
+                <span v-if="m.streaming" class="stream-cursor">▍</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div v-else class="messages empty-panel">
+          <p>选择左侧的会话，或新建一个聊天开始对话。</p>
+          <button type="button" class="btn btn-primary" @click="openNewChat">新建聊天</button>
+        </div>
+        <div v-if="chat && !loadingChat" class="doc-bar-wrap">
+          <div v-if="chat.documents && chat.documents.length" class="doc-bar">
+            <span class="doc-bar-title">已上传文档：</span>
+            <span v-for="d in chat.documents" :key="d.id" class="doc-chip" :title="d.filename">📄 {{ d.filename }}</span>
+          </div>
+          <div class="composer">
+            <input ref="docInput" type="file" accept=".txt" class="doc-file-input" @change="onPickDoc">
+            <button type="button" class="icon-btn composer-doc-btn" title="上传 txt 文档" aria-label="上传 txt 文档"
+              :disabled="uploading || streaming" @click="pickDoc">{{ uploading ? '⏳' : '📄' }}</button>
+            <textarea v-model="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行"
+              @keydown.enter.exact.prevent="onSend"></textarea>
+            <button v-if="!streaming" type="button" class="btn btn-primary" :disabled="!canSend" @click="onSend">发送</button>
+            <button v-else type="button" class="btn btn-danger" @click="stopStreaming">停止</button>
+          </div>
+        </div>
+      </main>
+      <new-chat-modal v-if="modalOpen" :personas="personas" :loading="personasLoading"
+        :default-self-persona="defaultSelfPersona"
+        @close="modalOpen = false" @create="createChat" @goto-personas="gotoPersonas"></new-chat-modal>
+      <div v-if="selfDialogOpen" class="modal-mask" @click.self="closeSelfDialog">
+        <div class="modal">
+          <div class="modal-head">
+            <span class="modal-title">我的身份</span>
+            <button type="button" class="icon-btn" aria-label="关闭" @click="closeSelfDialog">×</button>
+          </div>
+          <div class="modal-body">
+            <label class="field">
+              <span class="field-label">我的身份设定</span>
+              <textarea v-model="selfForm.text" class="self-textarea" maxlength="20000"
+                placeholder="例如：我是角色的老朋友，请称呼我为「阿明」，我是一名大学生…"></textarea>
+              <span class="char-count" :class="{ 'char-count-over': selfForm.text.length > 20000 }">{{ selfForm.text.length }} / 20000 字符</span>
+            </label>
+            <p class="hint">设定你（对话者）的身份，角色会据此称呼你并与你互动；留空保存可清除当前聊天的身份设定。</p>
+            <label class="switch-wrap">
+              <input type="checkbox" v-model="selfForm.saveAsDefault">
+              <span class="switch-label">保存为默认人设（以后新建聊天自动使用）</span>
+            </label>
+            <p v-if="selfError" class="form-error">{{ selfError }}</p>
+            <div class="form-actions">
+              <button type="button" class="btn btn-primary" :disabled="selfSaving" @click="saveSelfPersona">
+                {{ selfSaving ? '保存中…' : '保存' }}
+              </button>
+              <button type="button" class="btn btn-ghost" @click="closeSelfDialog">取消</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div v-if="dialogSettingsOpen" class="modal-mask" @click.self="closeDialogSettings">
+        <div class="modal">
+          <div class="modal-head">
+            <span class="modal-title">对话设置</span>
+            <button type="button" class="icon-btn" aria-label="关闭" @click="closeDialogSettings">×</button>
+          </div>
+          <div class="modal-body">
+            <div class="field">
+              <span class="field-label">模式</span>
+              <div class="mode-pick mode-pick-three">
+                <button type="button" class="mode-option" :class="{ active: dlgForm.mode === 'chat' }"
+                  @click="dlgForm.mode = 'chat'">
+                  <span class="mode-option-name">聊天模式</span>
+                  <span class="mode-option-desc">只进行角色对话</span>
+                </button>
+                <button type="button" class="mode-option" :class="{ active: dlgForm.mode === 'story' }"
+                  @click="dlgForm.mode = 'story'">
+                  <span class="mode-option-name">故事模式</span>
+                  <span class="mode-option-desc">附带神态、动作、心理与场景描写，并承接剧情</span>
+                </button>
+                <button type="button" class="mode-option" :class="{ active: dlgForm.mode === 'novel' }"
+                  @click="dlgForm.mode = 'novel'">
+                  <span class="mode-option-name">小说模式</span>
+                  <span class="mode-option-desc">以小说体裁创作/续写，篇幅更长</span>
+                </button>
+              </div>
+            </div>
+            <div v-if="dlgForm.mode === 'chat'" class="reply-len-row">
+              <label class="field reply-len-field">
+                <span class="field-label">最短回话字数（1..2000）</span>
+                <input v-model.number="dlgForm.minReplyChars" type="number" min="1" max="2000" step="1" inputmode="numeric">
+              </label>
+              <label class="field reply-len-field">
+                <span class="field-label">最长回话字数（1..4000）</span>
+                <input v-model.number="dlgForm.maxReplyChars" type="number" min="1" max="4000" step="1" inputmode="numeric">
+              </label>
+            </div>
+            <div v-if="dlgForm.mode === 'story'" class="story-settings">
+              <div class="field">
+                <span class="field-label">故事长短（仅故事模式生效）</span>
+                <div class="reply-len-row">
+                  <label class="field reply-len-field">
+                    <span class="field-label">最短故事字数（1..2000）</span>
+                    <input v-model.number="dlgForm.storyMinChars" type="number" min="1" max="2000" step="1" inputmode="numeric">
+                  </label>
+                  <label class="field reply-len-field">
+                    <span class="field-label">最长故事字数（1..4000）</span>
+                    <input v-model.number="dlgForm.storyMaxChars" type="number" min="1" max="4000" step="1" inputmode="numeric">
+                  </label>
+                </div>
+              </div>
+              <div class="field">
+                <label class="switch-wrap">
+                  <input type="checkbox" v-model="dlgForm.envDescriptionEnabled">
+                  <span class="switch-label">要求包含环境与人物周围描写</span>
+                </label>
+                <label v-if="dlgForm.envDescriptionEnabled" class="field">
+                  <span class="field-label">环境描写字数（0..2000，约多少字）</span>
+                  <input v-model.number="dlgForm.envDescriptionChars" type="number" min="0" max="2000" step="1" inputmode="numeric">
+                </label>
+              </div>
+            </div>
+            <div v-if="dlgForm.mode === 'novel'" class="story-settings">
+              <div class="field">
+                <span class="field-label">小说长短（仅小说模式生效）</span>
+                <div class="reply-len-row">
+                  <label class="field reply-len-field">
+                    <span class="field-label">最短小说字数（1..2000）</span>
+                    <input v-model.number="dlgForm.novelMinChars" type="number" min="1" max="2000" step="1" inputmode="numeric">
+                  </label>
+                  <label class="field reply-len-field">
+                    <span class="field-label">最长小说字数（1..4000）</span>
+                    <input v-model.number="dlgForm.novelMaxChars" type="number" min="1" max="4000" step="1" inputmode="numeric">
+                  </label>
+                </div>
+              </div>
+            </div>
+            <label class="field">
+              <span class="field-label">推理强度（所有模式生效）</span>
+              <select v-model="dlgForm.reasoningLevel" class="input">
+                <option value="off">关闭</option>
+                <option value="low">低</option>
+                <option value="medium">中</option>
+                <option value="high">高</option>
+              </select>
+            </label>
+            <p class="hint">最短字数不能大于最长字数；设置会随每次消息发给模型。</p>
+            <p v-if="dlgError" class="form-error">{{ dlgError }}</p>
+            <div class="form-actions">
+              <button type="button" class="btn btn-primary" :disabled="dlgSaving" @click="saveDialogSettings">
+                {{ dlgSaving ? '保存中…' : '保存' }}
+              </button>
+              <button type="button" class="btn btn-ghost" @click="closeDialogSettings">取消</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div v-if="suggestDialog" class="modal-mask" @click.self="dismissSuggestion">
+        <div class="modal">
+          <div class="modal-head">
+            <span class="modal-title">人设建议</span>
+            <button type="button" class="icon-btn" aria-label="关闭" @click="dismissSuggestion">×</button>
+          </div>
+          <div class="modal-body">
+            <p class="hint">检测到该文档可能含人设相关内容，是否加入当前人设？</p>
+            <p v-if="suggestDialog.message" class="suggest-msg">{{ suggestDialog.message }}</p>
+            <div v-if="suggestDialog.snippet" class="suggest-snippet">
+              <div class="suggest-snippet-title">建议追加的片段：</div>
+              <pre>{{ suggestDialog.snippet }}</pre>
+            </div>
+            <p v-if="suggestDialog.error" class="form-error">{{ suggestDialog.error }}</p>
+            <label class="switch-wrap">
+              <input type="checkbox" v-model="suggestDialog.noMoreAsk">
+              <span class="switch-label">以后不再提醒</span>
+            </label>
+            <div class="form-actions">
+              <button type="button" class="btn btn-primary"
+                :disabled="suggestDialog.applying || !suggestDialog.snippet" @click="applySuggestion">
+                {{ suggestDialog.applying ? '加入中…' : '加入人设' }}
+              </button>
+              <button type="button" class="btn btn-ghost" @click="dismissSuggestion">忽略</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <template id="tpl-chat-list">
+    <div class="chat-list">
+      <div class="chat-list-head">
+        <span class="chat-list-title">会话</span>
+        <button type="button" class="btn btn-primary btn-small" @click="$emit('new')">＋ 新建</button>
+      </div>
+      <div class="chat-list-body">
+        <div v-if="!chats.length" class="chat-list-empty">暂无聊天记录</div>
+        <div v-for="c in chats" :key="c.id" class="chat-item" :class="{ active: c.id === activeId }"
+          @click="$emit('select', c.id)">
+          <img v-if="c.personaAvatar" :src="c.personaAvatar" class="chat-avatar-sm" alt="">
+          <span v-else class="chat-avatar-sm chat-avatar-ph">{{ (c.title || c.personaName || '?').charAt(0) }}</span>
+          <div class="chat-item-main">
+            <div class="chat-item-title">{{ c.title || c.personaName || '未命名' }}</div>
+            <div class="chat-item-sub">
+              <template v-if="c.personaName">{{ c.personaName }} · </template>{{ c.messageCount }} 条 · {{ $time.fmtDateTime(c.updatedAt) }}
+            </div>
+          </div>
+          <button type="button" class="icon-btn chat-item-del" title="删除聊天" @click.stop="$emit('remove', c)">×</button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <template id="tpl-new-chat-modal">
+    <div class="modal-mask" @click.self="$emit('close')">
+      <div class="modal">
+        <div class="modal-head">
+          <span class="modal-title">选择人设</span>
+          <button type="button" class="icon-btn" aria-label="关闭" @click="$emit('close')">×</button>
+        </div>
+        <div class="modal-body">
+          <p v-if="loading" class="hint">正在加载人设…</p>
+          <template v-else-if="personas.length">
+            <button v-for="p in personas" :key="p.id" type="button" class="persona-pick"
+              @click="$emit('create', p, selfText.trim(), saveSelfAsDefault, mode)">
+              <img v-if="p.avatarUrl" :src="p.avatarUrl" class="persona-avatar-sm" alt="">
+              <span v-else class="persona-avatar-sm persona-avatar-ph">{{ (p.name || '?').charAt(0) }}</span>
+              <span class="persona-pick-name">{{ p.name }}</span>
+              <span class="persona-pick-meta">{{ $time.fmtSize(p.size) }}</span>
+            </button>
+          </template>
+          <div v-else class="empty">
+            <p>还没有人设，先创建一个人设再来聊天吧。</p>
+            <button type="button" class="btn btn-primary" @click="$emit('goto-personas')">去创建人设</button>
+          </div>
+          <div class="self-new-block">
+            <div class="field">
+              <span class="field-label">模式</span>
+              <div class="mode-pick mode-pick-three">
+                <button type="button" class="mode-option" :class="{ active: mode === 'chat' }"
+                  @click="mode = 'chat'">
+                  <span class="mode-option-name">聊天模式</span>
+                  <span class="mode-option-desc">只进行角色对话</span>
+                </button>
+                <button type="button" class="mode-option" :class="{ active: mode === 'story' }"
+                  @click="mode = 'story'">
+                  <span class="mode-option-name">故事模式</span>
+                  <span class="mode-option-desc">附带描写与剧情承接</span>
+                </button>
+                <button type="button" class="mode-option" :class="{ active: mode === 'novel' }"
+                  @click="mode = 'novel'">
+                  <span class="mode-option-name">小说模式</span>
+                  <span class="mode-option-desc">以小说体裁创作/续写</span>
+                </button>
+              </div>
+            </div>
+            <label class="field">
+              <span class="field-label">我的身份（可选）</span>
+              <textarea v-model="selfText" class="self-textarea" maxlength="20000"
+                placeholder="例如：我是角色的老朋友，请称呼我为「阿明」…（留空则使用默认设置）"></textarea>
+              <span class="char-count" :class="{ 'char-count-over': selfText.length > 20000 }">{{ selfText.length }} / 20000 字符</span>
+            </label>
+            <label class="switch-wrap">
+              <input type="checkbox" v-model="saveSelfAsDefault" :disabled="!selfText.trim()">
+              <span class="switch-label">保存为默认人设</span>
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- ======================= 人设管理 ======================= -->
+  <template id="tpl-personas">
+    <div class="page">
+      <div class="page-head">
+        <h1 class="page-title">人设管理</h1>
+        <button type="button" class="btn btn-primary" @click="startCreate">＋ 新建人设</button>
+      </div>
+      <p v-if="loadError" class="form-error">{{ loadError }}</p>
+      <div class="two-col">
+        <div class="panel persona-list">
+          <div v-if="loading" class="empty"><div class="spinner"></div><p>加载中…</p></div>
+          <div v-else-if="!personas.length" class="empty">
+            <p>还没有人设。点击右上角「新建人设」创建一个吧。</p>
+          </div>
+          <div v-for="p in personas" :key="p.id" class="persona-item" :class="{ active: editing && editId === p.id }">
+            <img v-if="p.avatarUrl" :src="p.avatarUrl" class="persona-avatar-sm" alt="">
+            <span v-else class="persona-avatar-sm persona-avatar-ph">{{ (p.name || '?').charAt(0) }}</span>
+            <button type="button" class="persona-item-main" @click="startEdit(p)">
+              <span class="persona-item-name">{{ p.name }}</span>
+              <span class="persona-item-meta">{{ $time.fmtSize(p.size) }} · 更新于 {{ $time.fmtDateTime(p.updatedAt) }}</span>
+            </button>
+            <div class="persona-item-actions">
+              <button type="button" class="btn btn-small" @click="download(p)">下载</button>
+              <button type="button" class="btn btn-small btn-danger-text" @click="remove(p)">删除</button>
+            </div>
+          </div>
+        </div>
+        <div class="panel persona-form-wrap" v-if="editing">
+          <h2 class="section-title">{{ editId ? '编辑人设' : '新建人设' }}</h2>
+          <div class="field">
+            <span class="field-label">头像</span>
+            <div class="avatar-area">
+              <img v-if="form.avatarUrl" :src="form.avatarUrl" class="persona-avatar" alt="头像">
+              <span v-else class="persona-avatar persona-avatar-ph">{{ (form.name || '?').charAt(0) }}</span>
+              <div class="avatar-actions">
+                <input ref="avatarInput" type="file" accept="image/png,image/jpeg" class="doc-file-input" @change="onAvatarPick">
+                <button type="button" class="btn btn-small" :disabled="avatarUploading || !editId" @click="pickAvatar">
+                  {{ avatarUploading ? '处理中…' : '上传头像' }}
+                </button>
+                <button type="button" class="btn btn-small" :disabled="avatarUploading || !editId || !form.avatarUrl"
+                  @click="removeAvatar">移除头像</button>
+                <span v-if="!editId" class="hint">请先保存人设后再上传头像。</span>
+              </div>
+            </div>
+            <p v-if="avatarError" class="form-error">{{ avatarError }}</p>
+            <span class="hint">支持 PNG / JPG，最大 2MB。</span>
+          </div>
+          <label class="field">
+            <span class="field-label">名称</span>
+            <input v-model.trim="form.name" type="text" maxlength="50" placeholder="人设名称（1-50 字符）">
+          </label>
+          <label class="field">
+            <span class="content-head-row">
+              <span class="field-label">人设内容</span>
+              <button type="button" class="btn btn-ghost btn-small" :disabled="importing" @click="pickImport">
+                {{ importing ? '导入中…' : '从文件导入' }}
+              </button>
+              <input ref="importInput" type="file" accept=".txt,.md,.markdown,.json,.html,.htm,.rtf,.docx"
+                class="doc-file-input" @change="onImportPick">
+            </span>
+            <textarea v-model="form.content" class="persona-content" placeholder="描述这个角色的身份、性格、说话风格、背景故事…"></textarea>
+            <span class="char-count" :class="{ 'char-count-over': contentLen > 200000 }">{{ contentLen }} / 200000 字符</span>
+            <span v-if="importError" class="form-error">{{ importError }}</span>
+          </label>
+          <div class="field">
+            <span class="field-label">人物属性</span>
+            <div class="attr-list">
+              <div v-for="(a, i) in form.attributes" :key="a._uid" class="attr-row">
+                <input v-model.trim="a.key" type="text" maxlength="30" class="attr-key"
+                  placeholder="属性名（1-30 字符，如：年龄）" aria-label="属性名">
+                <input v-model="a.value" type="text" maxlength="500" class="attr-value"
+                  placeholder="属性值（可留空，最多 500 字符）" aria-label="属性值">
+                <button type="button" class="icon-btn attr-del" title="删除该属性" aria-label="删除该属性"
+                  @click="removeAttribute(i)">×</button>
+              </div>
+              <div v-if="!form.attributes.length" class="hint attr-empty">暂无属性。添加的属性会写入人设文件，聊天时自动生效。</div>
+              <button type="button" class="btn btn-ghost btn-small attr-add"
+                :disabled="form.attributes.length >= 50" @click="addAttribute">＋ 添加属性</button>
+            </div>
+            <span class="hint">属性以「属性名：属性值」的形式附加在人设文件中，会随人设一起发给模型（最多 50 项）。</span>
+          </div>
+          <div class="field">
+            <label class="switch-wrap">
+              <input type="checkbox" v-model="form.stateEnabled">
+              <span class="switch-label">启用状态系统</span>
+            </label>
+            <div v-if="form.stateEnabled" class="attr-list">
+              <div class="field-label">状态属性（状态名 / 初始值）</div>
+              <div v-for="(s, i) in form.stateAttributes" :key="s._uid" class="attr-row">
+                <input v-model.trim="s.key" type="text" maxlength="30" class="attr-key"
+                  placeholder="状态名（1-30 字符，如：好感度）" aria-label="状态名">
+                <input v-model="s.value" type="text" maxlength="500" class="attr-value"
+                  placeholder="初始值（可留空，最多 500 字符）" aria-label="状态初始值">
+                <button type="button" class="icon-btn attr-del" title="删除该状态" aria-label="删除该状态"
+                  @click="removeStateAttribute(i)">×</button>
+              </div>
+              <div v-if="!form.stateAttributes.length" class="hint attr-empty">暂无状态属性。例如：好感度 50、心情 平静。</div>
+              <button type="button" class="btn btn-ghost btn-small attr-add"
+                :disabled="form.stateAttributes.length >= 50" @click="addStateAttribute">＋ 添加状态</button>
+            </div>
+            <span class="hint">启用后，聊天时模型会根据对话更新这些状态（如好感度、心情），并在聊天界面显示「角色状态」面板。</span>
+          </div>
+          <details class="form-hint">
+            <summary>「如何使用」示例</summary>
+            <div class="hint-body">
+              <p>用自然语言描述你要扮演的角色，例如：</p>
+              <p class="hint-example">你是一位温柔的咖啡店老板娘，三十岁出头，说话轻声细语，喜欢用「哦」「呢」等语气词。你熟悉咖啡与烘焙，会记住老客人的口味，偶尔分享店里的小故事。</p>
+              <p>聊天时，系统会把这些内容作为人设设定发给模型。</p>
+            </div>
+          </details>
+          <p v-if="formError" class="form-error">{{ formError }}</p>
+          <div class="form-actions">
+            <button type="button" class="btn btn-primary" :disabled="saving || !canSave" @click="save">{{ saving ? '保存中…' : '保存' }}</button>
+            <button type="button" class="btn btn-ghost" @click="cancel">取消</button>
+          </div>
+        </div>
+        <div class="panel persona-form-wrap" v-else>
+          <div class="empty">
+            <p>选择左侧的人设进行编辑，或点击「新建人设」。</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- ======================= 导入向导 ======================= -->
+  <template id="tpl-import">
+    <div class="page">
+      <div class="page-head">
+        <h1 class="page-title">导入人设</h1>
+      </div>
+      <div class="panel import-card">
+        <ol class="steps">
+          <li class="step" :class="{ active: step === 1, done: step > 1 }"><span class="step-no">1</span>{{ localMode ? '粘贴对话内容' : '输入下载地址' }}</li>
+          <li class="step" :class="{ active: step === 2, done: step > 2 }"><span class="step-no">2</span>预览与提取</li>
+          <li class="step" :class="{ active: step === 3 }"><span class="step-no">3</span>确认保存</li>
+        </ol>
+
+        <div v-if="step === 1" class="step-body">
+          <template v-if="localMode">
+            <p class="hint">本机版不支持按链接抓取。请粘贴 DeepSeek 移动端导出的聊天记录文本（【用户】/【助手】对话内容），提取后可在下一步预览修改。</p>
+            <label class="field">
+              <span class="field-label">对话内容</span>
+              <textarea v-model="pasted" class="persona-content" placeholder="粘贴对话内容…"></textarea>
+            </label>
+          </template>
+          <template v-else>
+            <p class="hint">粘贴 DeepSeek 移动端导出的聊天记录下载地址（http/https），服务端会代为抓取并解析。</p>
+            <label class="field">
+              <span class="field-label">下载地址</span>
+              <input v-model.trim="url" type="url" placeholder="https://…">
+            </label>
+          </template>
+          <p v-if="step1Error" class="form-error">{{ step1Error }}</p>
+          <div class="form-actions">
+            <button type="button" class="btn btn-primary" :disabled="fetching" @click="fetchTranscript">
+              {{ fetching ? (localMode ? '提取中…' : '抓取中…') : (localMode ? '提取人设' : '获取对话记录') }}
+            </button>
+          </div>
+        </div>
+
+        <div v-else-if="step === 2" class="step-body">
+          <div class="fetch-meta">
+            <span class="fetch-meta-item">来源类型：{{ fetched.kind }}</span>
+            <span v-if="fetched.title" class="fetch-meta-item">标题：{{ fetched.title }}</span>
+            <span class="fetch-meta-item">大小：{{ $time.fmtSize(fetched.bytes) }}</span>
+            <span v-if="fetched.transcriptTruncated" class="badge badge-warn">内容过长，已截断</span>
+          </div>
+          <div class="transcript-box"><pre>{{ fetched.transcript }}</pre></div>
+          <p v-if="step2Error" class="form-error">{{ step2Error }}</p>
+          <div class="form-actions">
+            <button type="button" class="btn btn-primary" :disabled="extracting" @click="extract">
+              {{ extracting ? '提取中…' : '提取人设' }}
+            </button>
+            <button type="button" class="btn btn-ghost" @click="restart">重新输入</button>
+          </div>
+        </div>
+
+        <div v-else-if="step === 3" class="step-body">
+          <div class="fetch-meta">
+            <span class="source-badge" :class="extracted.source === 'llm' ? 'source-llm' : 'source-heuristic'">
+              {{ extracted.source === 'llm' ? 'AI 提取' : '启发式提取' }}
+            </span>
+          </div>
+          <div v-if="extracted.warning" class="warning-box">⚠ {{ extracted.warning }}</div>
+          <label class="field">
+            <span class="field-label">人设名称</span>
+            <input v-model.trim="name" type="text" maxlength="50" placeholder="人设名称（1-50 字符）">
+          </label>
+          <label class="field">
+            <span class="field-label">人设内容（可编辑）</span>
+            <textarea v-model="content" class="persona-content" placeholder="提取结果将显示在这里，可修改后保存"></textarea>
+            <span class="char-count" :class="{ 'char-count-over': content.length > 200000 }">{{ content.length }} / 200000 字符</span>
+          </label>
+          <p v-if="step3Error" class="form-error">{{ step3Error }}</p>
+          <div class="form-actions">
+            <button type="button" class="btn btn-primary" :disabled="saving || !canSave" @click="save">{{ saving ? '保存中…' : '保存人设' }}</button>
+            <button type="button" class="btn btn-ghost" @click="restart">重新开始</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- ======================= 设置 ======================= -->
+  <template id="tpl-settings">
+    <div class="page">
+      <div class="page-head">
+        <h1 class="page-title">设置</h1>
+      </div>
+      <div class="settings-col">
+        <section class="panel settings-card">
+          <h2 class="section-title">DeepSeek API Key</h2>
+          <p class="hint">Key 由你自己填写，服务端加密存储，仅用于你账号的模型调用。</p>
+          <p v-if="hasApiKey" class="key-note">已配置 Key：<code>{{ apiKeyMasked }}</code></p>
+          <div class="key-row">
+            <input v-model="apiKeyInput" :type="showKey ? 'text' : 'password'" class="key-input"
+              placeholder="留空表示不修改" autocomplete="off">
+            <button type="button" class="btn btn-ghost" @click="showKey = !showKey">{{ showKey ? '隐藏' : '显示' }}</button>
+          </div>
+          <p v-if="keyMsg" class="form-error">{{ keyMsg }}</p>
+          <div class="form-actions">
+            <button type="button" class="btn btn-primary" :disabled="savingKey" @click="saveKey">{{ savingKey ? '保存中…' : '保存 Key' }}</button>
+            <button type="button" class="btn btn-ghost" @click="testKey" :disabled="testing">{{ testing ? '测试中…' : '测试 Key' }}</button>
+            <button v-if="hasApiKey" type="button" class="btn btn-danger-text" @click="clearKey">清除已存 Key</button>
+          </div>
+          <div v-if="testResult" class="test-result" :class="testResult.ok ? 'test-ok' : 'test-fail'">
+            {{ testResult.ok ? '✓' : '✗' }} {{ testResult.message }}
+          </div>
+        </section>
+
+        <section class="panel settings-card">
+          <h2 class="section-title">默认模型</h2>
+          <label class="field">
+            <span class="field-label">模型</span>
+            <select v-model="model" class="input" @change="onModelChange">
+              <option v-for="m in models" :key="m" :value="m">{{ m }}</option>
+            </select>
+          </label>
+          <p class="hint">新建聊天时默认使用的模型。</p>
+        </section>
+
+        <section class="panel settings-card settings-password-sec">
+          <h2 class="section-title">修改密码</h2>
+          <label class="field">
+            <span class="field-label">旧密码</span>
+            <input v-model="oldPassword" type="password" autocomplete="current-password">
+          </label>
+          <label class="field">
+            <span class="field-label">新密码</span>
+            <input v-model="newPassword" type="password" autocomplete="new-password" placeholder="至少 6 位">
+          </label>
+          <label class="field">
+            <span class="field-label">确认新密码</span>
+            <input v-model="confirmPassword" type="password" autocomplete="new-password">
+          </label>
+          <p v-if="pwMsg" class="form-error">{{ pwMsg }}</p>
+          <p v-if="pwOk" class="form-ok">{{ pwOk }}</p>
+          <div class="form-actions">
+            <button type="button" class="btn btn-primary" :disabled="pwBusy" @click="changePassword">{{ pwBusy ? '提交中…' : '修改密码' }}</button>
+          </div>
+        </section>
+
+        <section v-if="localMode" class="panel settings-card">
+          <h2 class="section-title">数据备份 / 恢复</h2>
+          <p class="hint">数据仅保存在本机浏览器（localStorage）。建议定期导出备份；清除 Safari 网站数据会丢失全部内容。</p>
+          <div class="form-actions">
+            <button type="button" class="btn btn-primary" @click="backupData">导出全部数据（JSON）</button>
+            <input ref="restoreInput" type="file" accept=".json,application/json" class="doc-file-input" @change="onRestorePick">
+            <button type="button" class="btn btn-ghost" @click="pickRestore">从备份恢复</button>
+          </div>
+          <p v-if="restoreError" class="form-error">{{ restoreError }}</p>
+        </section>
+      </div>
+    </div>
+  </template>
+
+  <!-- ======================= 管理面板 ======================= -->
+  <template id="tpl-admin">
+    <div class="page">
+      <div class="page-head">
+        <h1 class="page-title">管理面板</h1>
+      </div>
+      <p v-if="loadError" class="form-error">{{ loadError }}</p>
+      <div v-if="loading" class="empty"><div class="spinner"></div><p>加载中…</p></div>
+      <template v-else>
+        <section class="panel settings-card">
+          <h2 class="section-title">新建账户</h2>
+          <div class="admin-create">
+            <label class="field">
+              <span class="field-label">用户名</span>
+              <input v-model.trim="create.username" type="text" maxlength="24" placeholder="2-24 位字母、数字、下划线或中文">
+            </label>
+            <label class="field">
+              <span class="field-label">密码</span>
+              <input v-model="create.password" type="password" autocomplete="new-password" placeholder="至少 6 位">
+            </label>
+            <label class="field">
+              <span class="field-label">到期日（可选）</span>
+              <input v-model="create.expiry" type="date">
+            </label>
+            <div class="form-actions">
+              <button type="button" class="btn btn-primary" :disabled="creating" @click="createAccount">{{ creating ? '创建中…' : '创建账户' }}</button>
+            </div>
+          </div>
+          <p v-if="createError" class="form-error">{{ createError }}</p>
+          <p class="hint">到期日留空表示永久有效。到期日当天 00:00（服务器时区）起账户自动停止使用。</p>
+        </section>
+
+        <section class="panel settings-card">
+          <div class="settings-head-row">
+            <h2 class="section-title">账户列表</h2>
+            <label class="switch-wrap">
+              <span class="switch-label">允许注册</span>
+              <input type="checkbox" v-model="allowRegistration" :disabled="regSaving" @change="toggleRegistration">
+            </label>
+          </div>
+          <div class="table-wrap">
+            <table class="admin-table">
+              <thead>
+                <tr>
+                  <th>用户名</th>
+                  <th>角色</th>
+                  <th>状态</th>
+                  <th>到期日</th>
+                  <th>最近登录</th>
+                  <th>人设数</th>
+                  <th>聊天数</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="a in accounts" :key="a.username">
+                  <td class="cell-strong">{{ a.username }}</td>
+                  <td>{{ a.role === 'admin' ? '管理员' : '用户' }}</td>
+                  <td><span class="badge" :class="'badge-' + statusClass(a)">{{ statusText(a) }}</span></td>
+                  <td class="cell-nowrap">
+                    <span v-if="a.role === 'admin'" class="hint" title="管理员账户不设到期时间，永久可用">永久（管理员）</span>
+                    <input v-else type="date" class="date-input" :value="a.expiry || ''"
+                      @change="setExpiry(a.username, $event.target.value)" title="留空表示永久有效">
+                  </td>
+                  <td class="cell-nowrap">{{ $time.fmtDateTime(a.lastLogin) }}</td>
+                  <td>{{ a.personaCount }}</td>
+                  <td>{{ a.chatCount }}</td>
+                  <td class="cell-actions">
+                    <template v-if="a.role === 'admin'">
+                      <button type="button" class="btn btn-small" disabled title="管理员账户不可停用">停用</button>
+                      <button type="button" class="btn btn-small" @click="openPersonaViewer(a.username)">查看人设</button>
+                      <button v-if="!isSelf(a)" type="button" class="btn btn-small" @click="openReset(a.username)">重置密码</button>
+                      <button type="button" class="btn btn-small btn-danger-text" disabled title="管理员账户不可删除">删除</button>
+                      <span class="hint">管理员账户不可停用/删除</span>
+                      <span v-if="isSelf(a)" class="hint">（当前账户）</span>
+                    </template>
+                    <template v-else>
+                      <button type="button" class="btn btn-small" @click="openPersonaViewer(a.username)">查看人设</button>
+                      <button type="button" class="btn btn-small" @click="toggleDisabled(a)">
+                        {{ a.disabled ? '启用' : '停用' }}
+                      </button>
+                      <button type="button" class="btn btn-small" @click="openReset(a.username)">重置密码</button>
+                      <button type="button" class="btn btn-small btn-danger-text" @click="remove(a.username)">删除</button>
+                    </template>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel settings-card">
+          <div class="settings-head-row">
+            <h2 class="section-title">在线用户</h2>
+            <div class="online-head-actions">
+              <span class="badge badge-ok">在线人数：{{ onlineCount }}</span>
+              <button type="button" class="btn btn-small" :disabled="onlineLoading" @click="loadOnline">
+                {{ onlineLoading ? '刷新中…' : '刷新' }}
+              </button>
+            </div>
+          </div>
+          <p v-if="onlineError" class="form-error">{{ onlineError }}</p>
+          <div class="table-wrap">
+            <table class="admin-table">
+              <thead>
+                <tr>
+                  <th>用户名</th>
+                  <th>角色</th>
+                  <th>登录时间</th>
+                  <th>最后活动时间</th>
+                  <th>到期日</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="o in online" :key="o.username">
+                  <td class="cell-strong">{{ o.username }}</td>
+                  <td>{{ o.role === 'admin' ? '管理员' : '用户' }}</td>
+                  <td class="cell-nowrap">{{ $time.fmtDateTime(o.loginAt) }}</td>
+                  <td class="cell-nowrap">{{ o.lastSeenAt ? $time.fmtDateTime(o.lastSeenAt) : '—' }}</td>
+                  <td class="cell-nowrap">{{ o.expiry || '永久' }}</td>
+                  <td class="cell-actions">
+                    <button type="button" class="btn btn-small" @click="openChatViewer(o.username)">查看聊天</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <div v-if="!onlineLoading && !online.length" class="table-empty">当前没有在线用户</div>
+          </div>
+          <p class="hint">每 30 秒自动刷新。</p>
+        </section>
+      </template>
+
+      <div v-if="reset" class="modal-mask" @click.self="reset = null">
+        <div class="modal">
+          <div class="modal-head">
+            <span class="modal-title">重置密码：{{ reset }}</span>
+            <button type="button" class="icon-btn" aria-label="关闭" @click="reset = null">×</button>
+          </div>
+          <div class="modal-body">
+            <label class="field">
+              <span class="field-label">新密码</span>
+              <input v-model="resetPassword" type="password" autocomplete="new-password" placeholder="至少 6 位">
+            </label>
+            <p v-if="resetError" class="form-error">{{ resetError }}</p>
+            <div class="form-actions">
+              <button type="button" class="btn btn-primary" :disabled="resetting" @click="submitReset">{{ resetting ? '提交中…' : '确定重置' }}</button>
+              <button type="button" class="btn btn-ghost" @click="reset = null">取消</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="viewerOpen" class="modal-mask" @click.self="closeChatViewer">
+        <div class="modal viewer-modal">
+          <div class="modal-head">
+            <span class="modal-title">用户聊天查看：{{ viewer.username }}</span>
+            <button type="button" class="icon-btn" aria-label="关闭" @click="closeChatViewer">×</button>
+          </div>
+          <div class="modal-body viewer-body">
+            <!-- 聊天列表态 -->
+            <template v-if="!viewer.activeChat">
+              <div v-if="viewer.loadingList" class="empty">
+                <div class="spinner"></div>
+                <p>加载中…</p>
+              </div>
+              <p v-if="viewer.listError" class="form-error">{{ viewer.listError }}</p>
+              <template v-else>
+                <div v-if="!viewer.chats.length" class="table-empty">该用户暂无聊天记录</div>
+                <div v-else class="viewer-list">
+                  <button v-for="c in viewer.chats" :key="c.id" type="button" class="viewer-chat-item"
+                    @click="openUserChat(c)">
+                    <span class="viewer-chat-main">
+                      <span class="viewer-chat-title">{{ c.title || c.personaName || '未命名' }}</span>
+                      <span class="viewer-chat-sub">
+                        <template v-if="c.personaName">{{ c.personaName }} · </template>{{ c.messageCount }} 条 · {{ $time.fmtDateTime(c.updatedAt) }}
+                      </span>
+                    </span>
+                    <span class="viewer-chat-arrow">›</span>
+                  </button>
+                </div>
+              </template>
+            </template>
+            <!-- 消息详情态（只读） -->
+            <template v-else>
+              <div class="viewer-chat-toolbar">
+                <button type="button" class="btn btn-small" @click="backToChatList">← 返回列表</button>
+                <span class="viewer-chat-title-sm">{{ viewer.activeChat.title || viewer.activeChat.personaName || '未命名' }}</span>
+              </div>
+              <div v-if="viewer.loadingChat" class="empty">
+                <div class="spinner"></div>
+                <p>加载中…</p>
+              </div>
+              <p v-if="viewer.chatError" class="form-error">{{ viewer.chatError }}</p>
+              <div v-else-if="viewer.activeChat.messages && viewer.activeChat.messages.length" class="viewer-messages">
+                <div v-for="m in viewer.activeChat.messages" :key="m.id" class="msg" :class="'msg-' + m.role">
+                  <div class="bubble">
+                    <div v-if="m.role === 'assistant'" class="md-body" v-sanitize="m.content"></div>
+                    <div v-else class="plain-body">{{ m.content }}</div>
+                    <div class="msg-meta">
+                      <span class="msg-time">{{ $time.fmtTime(m.ts) }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div v-else-if="!viewer.loadingChat && !viewer.chatError" class="table-empty">该聊天暂无消息</div>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="personaViewerOpen" class="modal-mask" @click.self="closePersonaViewer">
+        <div class="modal viewer-modal">
+          <div class="modal-head">
+            <span class="modal-title">用户人设查看：{{ personaViewer.username }}</span>
+            <button type="button" class="icon-btn" aria-label="关闭" @click="closePersonaViewer">×</button>
+          </div>
+          <div class="modal-body viewer-body">
+            <!-- 人设列表态 -->
+            <template v-if="!personaViewer.active">
+              <div v-if="personaViewer.loadingList" class="empty">
+                <div class="spinner"></div>
+                <p>加载中…</p>
+              </div>
+              <p v-if="personaViewer.listError" class="form-error">{{ personaViewer.listError }}</p>
+              <template v-else>
+                <div v-if="!personaViewer.personas.length" class="table-empty">该用户暂无人设</div>
+                <div v-else class="viewer-list">
+                  <button v-for="p in personaViewer.personas" :key="p.id" type="button" class="viewer-chat-item"
+                    @click="openUserPersona(p)">
+                    <img v-if="p.avatarUrl" :src="p.avatarUrl" class="persona-avatar-sm" alt="">
+                    <span v-else class="persona-avatar-sm persona-avatar-ph">{{ (p.name || '?').charAt(0) }}</span>
+                    <span class="viewer-chat-main">
+                      <span class="viewer-chat-title">
+                        {{ p.name }}
+                        <span v-if="p.stateEnabled" class="badge badge-ok badge-mini">状态系统</span>
+                      </span>
+                      <span class="viewer-chat-sub">{{ $time.fmtSize(p.size) }} · 更新于 {{ $time.fmtDateTime(p.updatedAt) }}</span>
+                    </span>
+                    <span class="viewer-chat-arrow">›</span>
+                  </button>
+                </div>
+              </template>
+            </template>
+            <!-- 人设详情态（只读） -->
+            <template v-else>
+              <div class="viewer-chat-toolbar">
+                <button type="button" class="btn btn-small" @click="backToPersonaList">← 返回列表</button>
+                <span class="viewer-chat-title-sm">{{ personaViewer.active.name }}</span>
+              </div>
+              <div v-if="personaViewer.loadingDetail" class="empty">
+                <div class="spinner"></div>
+                <p>加载中…</p>
+              </div>
+              <p v-if="personaViewer.detailError" class="form-error">{{ personaViewer.detailError }}</p>
+              <template v-else-if="personaViewer.active">
+                <div class="persona-detail-meta">
+                  <img v-if="personaViewer.active.avatarUrl" :src="personaViewer.active.avatarUrl" class="persona-avatar" alt="头像">
+                  <span v-else class="persona-avatar persona-avatar-ph">{{ (personaViewer.active.name || '?').charAt(0) }}</span>
+                  <span class="badge" :class="personaViewer.active.stateEnabled ? 'badge-ok' : 'badge-muted'">
+                    {{ personaViewer.active.stateEnabled ? '状态系统已启用' : '状态系统未启用' }}
+                  </span>
+                  <span class="hint">更新于 {{ $time.fmtDateTime(personaViewer.active.updatedAt) }} · {{ $time.fmtSize(personaViewer.active.size) }}</span>
+                </div>
+                <div class="persona-detail-sec">
+                  <div class="field-label">人设正文</div>
+                  <div class="persona-detail-content">{{ personaViewer.active.content }}</div>
+                </div>
+                <div class="persona-detail-sec">
+                  <div class="field-label">人物属性</div>
+                  <div v-if="personaViewer.active.attributes && personaViewer.active.attributes.length" class="table-wrap">
+                    <table class="admin-table">
+                      <thead><tr><th>属性名</th><th>属性值</th></tr></thead>
+                      <tbody>
+                        <tr v-for="(a, i) in personaViewer.active.attributes" :key="i">
+                          <td>{{ a.key }}</td>
+                          <td>{{ a.value }}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <p v-else class="hint">无</p>
+                </div>
+                <div class="persona-detail-sec">
+                  <div class="field-label">状态属性</div>
+                  <div v-if="personaViewer.active.stateAttributes && personaViewer.active.stateAttributes.length" class="table-wrap">
+                    <table class="admin-table">
+                      <thead><tr><th>状态名</th><th>初始值</th></tr></thead>
+                      <tbody>
+                        <tr v-for="(s, i) in personaViewer.active.stateAttributes" :key="i">
+                          <td>{{ s.key }}</td>
+                          <td>{{ s.value }}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <p v-else class="hint">无</p>
+                </div>
+              </template>
+            </template>
+          </div>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- ======================= 使用教程弹窗 ======================= -->
+  <template id="tpl-tutorial">
+    <div class="modal-mask" @click.self="close">
+      <div class="modal tutorial-modal">
+        <div class="modal-head">
+          <span class="modal-title">使用教程</span>
+          <button type="button" class="icon-btn" aria-label="关闭" @click="close">×</button>
+        </div>
+        <div class="modal-body tutorial-body">
+          <div v-if="loading" class="empty"><div class="spinner"></div><p>加载中…</p></div>
+          <p v-else-if="error" class="form-error">{{ error }}</p>
+          <div v-else class="md-body" v-html="html"></div>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <script src="vendor/vue.global.prod.js"></script>
+  <script src="vendor/marked.umd.js"></script>
+  <script src="vendor/purify.min.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/time.js"></script>
+  <script src="js/ios-hint.js"></script>
+  <script src="js/local-store.js"></script>
+  <script src="js/local-api.js"></script>
+  <script src="js/markdown.js"></script>
+  <script src="js/router.js"></script>
+  <script src="js/components/toast.js"></script>
+  <script src="js/components/topbar.js"></script>
+  <script src="js/components/tutorial.js"></script>
+  <script src="js/views/setup.js"></script>
+  <script src="js/views/login.js"></script>
+  <script src="js/views/chat.js"></script>
+  <script src="js/views/personas.js"></script>
+  <script src="js/views/import.js"></script>
+  <script src="js/views/settings.js"></script>
+  <script src="js/views/admin.js"></script>
+  <script src="js/app.js"></script>
+  <script>
+    // 契约 34：仅在 HTTPS 或 localhost 注册 Service Worker（失败静默）
+    if ('serviceWorker' in navigator &&
+        (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
+      navigator.serviceWorker.register('sw.js').catch(function () {});
+    }
+  </script>
+</body>
+</html>
